@@ -123,7 +123,7 @@ bitflags! {
 
         const MARKER_ACTIVATE = 1 << 21;
 
-        const EXCLUSIVE_FULLSCREEN_OR_MASK = WindowFlags::ALWAYS_ON_TOP.bits();
+        //const EXCLUSIVE_FULLSCREEN_OR_MASK = WindowFlags::ALWAYS_ON_TOP.bits();
     }
 }
 
@@ -243,12 +243,12 @@ impl MouseProperties {
 }
 
 impl WindowFlags {
-    fn mask(mut self) -> WindowFlags {
+    /* fn mask(mut self) -> WindowFlags {
         if self.contains(WindowFlags::MARKER_EXCLUSIVE_FULLSCREEN) {
             self |= WindowFlags::EXCLUSIVE_FULLSCREEN_OR_MASK;
         }
         self
-    }
+    } */
 
     pub fn to_window_styles(self) -> (WINDOW_STYLE, WINDOW_EX_STYLE) {
         // Required styles to properly support common window functionality like aero snap.
@@ -296,6 +296,7 @@ impl WindowFlags {
             WindowFlags::MARKER_EXCLUSIVE_FULLSCREEN | WindowFlags::MARKER_BORDERLESS_FULLSCREEN,
         ) {
             style &= !WS_OVERLAPPEDWINDOW;
+            style |= WS_POPUP;
         }
 
         (style, style_ex)
@@ -303,8 +304,8 @@ impl WindowFlags {
 
     /// Adjust the window client rectangle to the return value, if present.
     fn apply_diff(mut self, window: HWND, mut new: WindowFlags) {
-        self = self.mask();
-        new = new.mask();
+        //self = self.mask();
+        //new = new.mask();
 
         let mut diff = self ^ new;
 
