@@ -1509,8 +1509,26 @@ where
 
     // Need to set FULLSCREEN or MAXIMIZED after CreateWindowEx
     // This is because if the size is changed in WM_CREATE, the restored size will be stored in that size.
-    if fullscreen.0.is_some() {
-        win.set_fullscreen(fullscreen.0.map(Into::into));
+    let fullscreen: Option<Fullscreen> = fullscreen.0.map(Into::into);
+
+    let fullscreen_set = if let Some(fullscreen) = fullscreen {
+        if let Fullscreen::Exclusive(video_mode) = fullscreen.clone() {
+            // Try to set exclusive fullscreen
+            if win.try_set_fullscreen(Some(fullscreen.clone())).is_ok() {
+                true
+            } else {
+                // But if that fails, fall back to borderless.
+                win.try_set_fullscreen(Some(Fullscreen::Borderless(Some(video_mode.monitor))))
+                    .is_ok()
+            }
+        } else {
+            win.try_set_fullscreen(Some(fullscreen)).is_ok()
+        }
+    } else {
+        false
+    };
+
+    if fullscreen_set {
         unsafe { force_window_active(win.window) };
     } else if maximized {
         win.set_maximized(true);
