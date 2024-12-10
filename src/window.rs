@@ -1087,6 +1087,14 @@ impl Window {
             .maybe_queue_on_main(move |w| w.set_fullscreen(fullscreen.map(|f| f.into())))
     }
 
+    /// Like `set_fullscreen`, but handles errors instead of asserting on them.
+    ///
+    /// Must be called on the event loop thread (panics otherwise).
+    pub fn try_set_fullscreen(&self, fullscreen: Option<Fullscreen>) -> Result<(), OsError> {
+        self.window
+            .maybe_wait_on_main(move |w| w.try_set_fullscreen(fullscreen.map(|f| f.into())))
+    }
+
     /// Gets the window's current fullscreen state.
     ///
     /// ## Platform-specific

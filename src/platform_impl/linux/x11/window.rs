@@ -869,6 +869,15 @@ impl UnownedWindow {
         }
     }
 
+    // TODO: return any errors?
+    pub(crate) fn try_set_fullscreen(
+        &self,
+        fullscreen: Option<Fullscreen>,
+    ) -> Result<(), RootOsError> {
+        self.set_fullscreen(fullscreen);
+        Ok(())
+    }
+
     // Called by EventProcessor when a VisibilityNotify event is received
     pub(crate) fn visibility_notify(&self) {
         let mut shared_state = self.shared_state_lock();

@@ -507,6 +507,12 @@ impl Window {
         }
     }
 
+    // TODO: return any errors?
+    pub fn try_set_fullscreen(&self, fullscreen: Option<Fullscreen>) -> Result<(), RootOsError> {
+        self.set_fullscreen(fullscreen);
+        Ok(())
+    }
+
     #[inline]
     pub fn set_cursor_icon(&self, cursor: CursorIcon) {
         self.window_state.lock().unwrap().set_cursor(cursor);

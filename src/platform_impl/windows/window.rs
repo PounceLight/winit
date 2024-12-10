@@ -17,8 +17,9 @@ use windows_sys::Win32::{
         Dwm::{DwmEnableBlurBehindWindow, DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND},
         Gdi::{
             ChangeDisplaySettingsExW, ClientToScreen, CreateRectRgn, DeleteObject, InvalidateRgn,
-            RedrawWindow, CDS_FULLSCREEN, DISP_CHANGE_BADFLAGS, DISP_CHANGE_BADMODE,
-            DISP_CHANGE_BADPARAM, DISP_CHANGE_FAILED, DISP_CHANGE_SUCCESSFUL, RDW_INTERNALPAINT,
+            RedrawWindow, CDS_FULLSCREEN, DISP_CHANGE_BADDUALVIEW, DISP_CHANGE_BADFLAGS,
+            DISP_CHANGE_BADMODE, DISP_CHANGE_BADPARAM, DISP_CHANGE_FAILED, DISP_CHANGE_NOTUPDATED,
+            DISP_CHANGE_RESTART, DISP_CHANGE_SUCCESSFUL, RDW_INTERNALPAINT,
         },
     },
     System::{
@@ -58,21 +59,24 @@ use crate::{
     dpi::{PhysicalPosition, PhysicalSize, Position, Size},
     error::{ExternalError, NotSupportedError, OsError as RootOsError},
     icon::Icon,
-    platform_impl::platform::{
-        dark_mode::try_theme,
-        definitions::{
-            CLSID_TaskbarList, IID_ITaskbarList, IID_ITaskbarList2, ITaskbarList, ITaskbarList2,
+    platform_impl::{
+        platform::{
+            dark_mode::try_theme,
+            definitions::{
+                CLSID_TaskbarList, IID_ITaskbarList, IID_ITaskbarList2, ITaskbarList, ITaskbarList2,
+            },
+            dpi::{dpi_to_scale_factor, enable_non_client_dpi_scaling, hwnd_dpi},
+            drop_handler::FileDropHandler,
+            event_loop::{self, EventLoopWindowTarget, DESTROY_MSG_ID},
+            icon::{self, IconType},
+            ime::ImeContext,
+            keyboard::KeyEventBuilder,
+            monitor::{self, MonitorHandle},
+            util,
+            window_state::{CursorFlags, SavedWindow, WindowFlags, WindowState},
+            Fullscreen, PlatformSpecificWindowBuilderAttributes, WindowId,
         },
-        dpi::{dpi_to_scale_factor, enable_non_client_dpi_scaling, hwnd_dpi},
-        drop_handler::FileDropHandler,
-        event_loop::{self, EventLoopWindowTarget, DESTROY_MSG_ID},
-        icon::{self, IconType},
-        ime::ImeContext,
-        keyboard::KeyEventBuilder,
-        monitor::{self, MonitorHandle},
-        util,
-        window_state::{CursorFlags, SavedWindow, WindowFlags, WindowState},
-        Fullscreen, PlatformSpecificWindowBuilderAttributes, WindowId,
+        OsError,
     },
     window::{
         CursorGrabMode, CursorIcon, ImePurpose, ResizeDirection, Theme, UserAttentionType,
@@ -827,6 +831,153 @@ impl Window {
         });
     }
 
+    pub fn try_set_fullscreen(&self, fullscreen: Option<Fullscreen>) -> Result<(), RootOsError> {
+        assert!(self.thread_executor.in_event_loop_thread());
+
+        let window = self.window;
+        let window_state = Arc::clone(&self.window_state);
+
+        let mut window_state_lock = window_state.lock().unwrap();
+        let old_fullscreen = window_state_lock.fullscreen.clone();
+
+        match (&old_fullscreen, &fullscreen) {
+            // Return if we already are in the same fullscreen mode
+            _ if old_fullscreen == fullscreen => return Ok(()),
+            // Return if saved Borderless(monitor) is the same as current monitor when requested fullscreen is Borderless(None)
+            (Some(Fullscreen::Borderless(Some(monitor))), Some(Fullscreen::Borderless(None)))
+                if *monitor == monitor::current_monitor(window) =>
+            {
+                return Ok(())
+            }
+            _ => {}
+        }
+
+        window_state_lock.fullscreen = fullscreen.clone();
+        drop(window_state_lock);
+
+        let _ = &window;
+        // Change video mode if we're transitioning to or from exclusive
+        // fullscreen
+        match (&old_fullscreen, &fullscreen) {
+            (_, Some(Fullscreen::Exclusive(video_mode))) => {
+                let monitor = video_mode.monitor();
+                let monitor_info =
+                    monitor::get_monitor_info(monitor.hmonitor()).map_err(|err| os_error!(err))?;
+
+                let res = unsafe {
+                    ChangeDisplaySettingsExW(
+                        monitor_info.szDevice.as_ptr(),
+                        &*video_mode.native_video_mode,
+                        0,
+                        CDS_FULLSCREEN,
+                        ptr::null(),
+                    )
+                };
+
+                if res != DISP_CHANGE_SUCCESSFUL {
+                    return Err(os_error!(OsError::other(disp_change_error_to_str(res))));
+                }
+            }
+            (Some(Fullscreen::Exclusive(_)), _) => {
+                let res = unsafe {
+                    ChangeDisplaySettingsExW(
+                        ptr::null(),
+                        ptr::null(),
+                        0,
+                        CDS_FULLSCREEN,
+                        ptr::null(),
+                    )
+                };
+
+                if res != DISP_CHANGE_SUCCESSFUL {
+                    return Err(os_error!(OsError::other(disp_change_error_to_str(res))));
+                }
+            }
+            _ => (),
+        }
+
+        unsafe {
+            // There are some scenarios where calling `ChangeDisplaySettingsExW` takes long
+            // enough to execute that the DWM thinks our program has frozen and takes over
+            // our program's window. When that happens, the `SetWindowPos` call below gets
+            // eaten and the window doesn't get set to the proper fullscreen position.
+            //
+            // Calling `PeekMessageW` here notifies Windows that our process is still running
+            // fine, taking control back from the DWM and ensuring that the `SetWindowPos` call
+            // below goes through.
+            let mut msg = mem::zeroed();
+            PeekMessageW(&mut msg, 0, 0, 0, PM_NOREMOVE);
+        }
+
+        // Update window style
+        WindowState::set_window_flags(window_state.lock().unwrap(), window, |f| {
+            f.set(
+                WindowFlags::MARKER_EXCLUSIVE_FULLSCREEN,
+                matches!(fullscreen, Some(Fullscreen::Exclusive(_))),
+            );
+            f.set(
+                WindowFlags::MARKER_BORDERLESS_FULLSCREEN,
+                matches!(fullscreen, Some(Fullscreen::Borderless(_))),
+            );
+        });
+
+        // Mark as fullscreen window wrt to z-order
+        //
+        // this needs to be called before the below fullscreen SetWindowPos as this itself
+        // will generate WM_SIZE messages of the old window size that can race with what we set below
+        unsafe {
+            taskbar_mark_fullscreen(window, fullscreen.is_some());
+        }
+
+        // Update window bounds
+        match &fullscreen {
+            Some(fullscreen) => {
+                // Save window bounds before entering fullscreen
+                let placement = unsafe {
+                    let mut placement = mem::zeroed();
+                    GetWindowPlacement(window, &mut placement);
+                    placement
+                };
+
+                window_state.lock().unwrap().saved_window = Some(SavedWindow { placement });
+
+                let monitor = match &fullscreen {
+                    Fullscreen::Exclusive(video_mode) => video_mode.monitor(),
+                    Fullscreen::Borderless(Some(monitor)) => monitor.clone(),
+                    Fullscreen::Borderless(None) => monitor::current_monitor(window),
+                };
+
+                let position: (i32, i32) = monitor.position().into();
+                let size: (u32, u32) = monitor.size().into();
+
+                unsafe {
+                    SetWindowPos(
+                        window,
+                        0,
+                        position.0,
+                        position.1,
+                        size.0 as i32,
+                        size.1 as i32,
+                        SWP_ASYNCWINDOWPOS | SWP_NOZORDER,
+                    );
+                    InvalidateRgn(window, 0, false.into());
+                }
+            }
+            None => {
+                let mut window_state_lock = window_state.lock().unwrap();
+                if let Some(SavedWindow { placement }) = window_state_lock.saved_window.take() {
+                    drop(window_state_lock);
+                    unsafe {
+                        SetWindowPlacement(window, &placement);
+                        InvalidateRgn(window, 0, false.into());
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     #[inline]
     pub fn set_decorations(&self, decorations: bool) {
         let window = self.window;
@@ -1039,6 +1190,19 @@ impl Window {
                 0,
             );
         }
+    }
+}
+
+fn disp_change_error_to_str(res: i32) -> &'static str {
+    match res {
+        DISP_CHANGE_RESTART => "DISP_CHANGE_RESTART",
+        DISP_CHANGE_FAILED => "DISP_CHANGE_FAILED",
+        DISP_CHANGE_BADMODE => "DISP_CHANGE_BADMODE",
+        DISP_CHANGE_NOTUPDATED => "DISP_CHANGE_NOTUPDATED",
+        DISP_CHANGE_BADFLAGS => "DISP_CHANGE_BADFLAGS",
+        DISP_CHANGE_BADPARAM => "DISP_CHANGE_BADPARAM",
+        DISP_CHANGE_BADDUALVIEW => "DISP_CHANGE_BADDUALVIEW",
+        _ => "Unknown ChangeDisplaySettingsExW error",
     }
 }
 

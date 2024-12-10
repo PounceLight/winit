@@ -494,6 +494,14 @@ impl Window {
         x11_or_wayland!(match self; Window(w) => w.set_fullscreen(monitor))
     }
 
+    pub(crate) fn try_set_fullscreen(
+        &self,
+        fullscreen: Option<Fullscreen>,
+    ) -> Result<(), RootOsError> {
+        assert!(is_main_thread());
+        x11_or_wayland!(match self; Window(w) => w.try_set_fullscreen(fullscreen))
+    }
+
     #[inline]
     pub fn set_decorations(&self, decorations: bool) {
         x11_or_wayland!(match self; Window(w) => w.set_decorations(decorations))

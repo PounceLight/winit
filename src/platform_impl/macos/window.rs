@@ -1227,6 +1227,15 @@ impl WinitWindow {
         };
     }
 
+    // TODO: handle errors
+    pub(crate) fn try_set_fullscreen(
+        &self,
+        fullscreen: Option<Fullscreen>,
+    ) -> Result<(), RootOsError> {
+        self.set_fullscreen(fullscreen);
+        Ok(())
+    }
+
     #[inline]
     pub fn set_decorations(&self, decorations: bool) {
         let mut shared_state_lock = self.lock_shared_state("set_decorations");
