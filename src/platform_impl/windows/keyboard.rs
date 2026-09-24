@@ -171,11 +171,14 @@ impl KeyEventBuilder {
                     MatchResult::TokenToRemove(pending_token)
                 }
                 WM_DEADCHAR | WM_SYSDEADCHAR => {
-                    let pending_token = self.pending.add_pending();
-                    *result = ProcResult::Value(0);
                     // At this point, we know that there isn't going to be any more events related to
                     // this key press
-                    let event_info = self.event_info.lock().unwrap().take().unwrap();
+                    let Some(event_info) = self.event_info.lock().unwrap().take() else {
+                        trace!("Received a DEADCHAR message but no `event_info` was available; returning.");
+                        return MatchResult::Nothing;
+                    };
+                    let pending_token = self.pending.add_pending();
+                    *result = ProcResult::Value(0);
                     let ev = event_info.finalize();
                     MatchResult::MessagesToDispatch(self.pending.complete_pending(
                         pending_token,
